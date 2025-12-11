@@ -1,0 +1,352 @@
+openapi: 3.0.3
+info:
+  title: IDML Translator API
+  version: 1.0.0
+  description: |
+    Proste API do ekstrakcji i eksportu segmentów z plików IDML oraz mockowego tłumaczenia.
+
+servers:
+  - url: http://localhost:4000
+    description: Local
+  - url: https://your-domain.tld
+    description: Production
+
+tags:
+  - name: health
+    description: Liveness / readiness
+  - name: files
+    description: Operacje na plikach IDML (upload, listing segmentów, eksport)
+  - name: translate
+    description: Mockowe tłumaczenia (pojedyncze i wsadowe)
+
+paths:
+  /api/healthz:
+    get:
+      tags: [health]
+      summary: Liveness probe
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+    head:
+      tags: [health]
+      summary: Lightweight liveness probe
+      responses:
+        '200':
+          description: OK
+
+  /api/files/upload:
+    post:
+      tags: [files]
+      summary: Upload IDML (ZIP) i zwróć wylistowane segmenty
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: Załadowano – identyfikator pliku i segmenty
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResponse'
+              examples:
+                ok:
+                  value:
+                    fileId: "f2f0a6d1-5a2f-4f5e-8b64-0f0c2b8a3e11"
+                    originalName: "document.idml"
+                    segments:
+                      - storyPath: "Stories/Story_1.xml"
+                        index: 0
+                        originalText: "Hello world"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /api/files/{fileId}/segments:
+    get:
+      tags: [files]
+      summary: Pobierz segmenty z już wgranego pliku
+      parameters:
+        - in: path
+          name: fileId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Segmenty dla pliku
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SegmentsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /api/files/{fileId}/export:
+    post:
+      tags: [files]
+      summary: Zastąp wskazane segmenty i zwróć IDML (ZIP)
+      parameters:
+        - in: path
+          name: fileId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportBody'
+            examples:
+              example:
+                value:
+                  replacements:
+                    - storyPath: "Stories/Story_1.xml"
+                      index: 0
+                      translatedText: "Witaj świecie"
+      responses:
+        '200':
+          description: Zarchiwizowany IDML z podmienionymi treściami
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /api/translate:
+    post:
+      tags: [translate]
+      summary: Mockowe tłumaczenie pojedynczego tekstu
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TranslateBody'
+            examples:
+              lipsum:
+                value: { text: "Hello", mode: "lipsum" }
+              reverse:
+                value: { text: "abc", mode: "reverse" }
+      responses:
+        '200':
+          description: Tekst przetłumaczony
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TranslateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /api/translate/batch:
+    post:
+      tags: [translate]
+      summary: Mockowe tłumaczenie wsadowe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TranslateBatchBody'
+            examples:
+              example:
+                value:
+                  items:
+                    - { text: "Hello" }
+                    - { text: "World" }
+                  mode: "lipsum"
+      responses:
+        '200':
+          description: Lista przetłumaczonych pozycji
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TranslateBatchResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+components:
+  schemas:
+    Health:
+      type: object
+      properties:
+        ok: { type: boolean }
+      required: [ok]
+
+    Segment:
+      type: object
+      properties:
+        storyPath: { type: string, description: "Ścieżka do pliku XML w IDML (np. Stories/Story_1.xml)" }
+        index: { type: integer, format: int32, minimum: 0, description: "Indeks wśród NIEPUSTYCH <Content> w story" }
+        originalText: { type: string }
+      required: [storyPath, index, originalText]
+
+    Replacement:
+      type: object
+      properties:
+        storyPath: { type: string }
+        index: { type: integer, format: int32, minimum: 0 }
+        translatedText: { type: string }
+      required: [storyPath, index, translatedText]
+
+    UploadResponse:
+      type: object
+      properties:
+        fileId: { type: string, format: uuid }
+        originalName: { type: string }
+        segments:
+          type: array
+          items: { $ref: '#/components/schemas/Segment' }
+      required: [fileId, originalName, segments]
+
+    SegmentsResponse:
+      type: object
+      properties:
+        fileId: { type: string }
+        originalName: { type: string }
+        segments:
+          type: array
+          items: { $ref: '#/components/schemas/Segment' }
+      required: [fileId, originalName, segments]
+
+    ExportBody:
+      type: object
+      properties:
+        replacements:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/Replacement' }
+      required: [replacements]
+
+    TranslateBody:
+      type: object
+      properties:
+        text: { type: string }
+        mode: { type: string, enum: [lipsum, reverse], default: lipsum }
+      required: [text]
+
+    TranslateResponse:
+      type: object
+      properties:
+        translatedText: { type: string }
+      required: [translatedText]
+
+    TranslateBatchBody:
+      type: object
+      properties:
+        items:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            properties:
+              text: { type: string }
+            required: [text]
+        mode: { type: string, enum: [lipsum, reverse], default: lipsum }
+      required: [items]
+
+    TranslateBatchResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              translatedText: { type: string }
+            required: [translatedText]
+      required: [items]
+
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        details:
+          description: Szczegóły walidacji (np. Zod)
+          type: array
+          items:
+            type: object
+            properties:
+              path: { type: string }
+              code: { type: string }
+              message: { type: string }
+        stack: { type: string, description: "Tylko w dev" }
+        cause: { type: string, description: "Tylko w dev" }
+      required: [error]
+
+  responses:
+    BadRequest:
+      description: Bad Request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Not Found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    PayloadTooLarge:
+      description: Payload Too Large
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    UnsupportedMediaType:
+      description: Unsupported Media Type
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unprocessable:
+      description: Unprocessable Entity
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ServerError:
+      description: Internal Server Error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
