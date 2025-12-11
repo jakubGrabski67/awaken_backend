@@ -19,6 +19,7 @@ export function createApp() {
     cors({
       origin: [
         /\.vercel\.app$/,
+        "https://awaken-frontend.vercel.app",
         "http://localhost:3000",
       ],
       credentials: true,
