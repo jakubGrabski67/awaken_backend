@@ -4,9 +4,11 @@ export async function mockTranslate(
 ) {
   // symulacja opóźnienia zewnętrznego providera
   await new Promise((r) => setTimeout(r, 300));
-  return mode === "reverse"
-    ? text.split("").reverse().join("")
-    : `Lorem Ipsum [Translated]: ${text}`;
+
+  if (mode === "reverse") {
+    return text.split("").reverse().join("");
+  }
+  return `${text} [Translated]`;
 }
 
 /** Batch do /translate/batch — spójny z mockTranslate */
@@ -15,10 +17,12 @@ export async function mockTranslateBatch(
   mode: "lipsum" | "reverse" = "lipsum"
 ) {
   await new Promise((r) => setTimeout(r, 300));
+  if (mode === "reverse") {
+    return items.map(({ text }) => ({
+      translatedText: text.split("").reverse().join(""),
+    }));
+  }
   return items.map(({ text }) => ({
-    translatedText:
-      mode === "reverse"
-        ? text.split("").reverse().join("")
-        : `Lorem Ipsum [Translated]: ${text}`,
+    translatedText: `${text} [Translated]`,
   }));
 }

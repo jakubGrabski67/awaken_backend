@@ -1,5 +1,5 @@
 import AdmZip from "adm-zip";
-import { XMLParser, XMLBuilder } from "fast-xml-parser";
+import { XMLParser, XMLBuilder, XMLValidator } from "fast-xml-parser";
 import { AppError } from "@/utils/errors";
 
 export type Segment = {
@@ -16,6 +16,7 @@ export type Replacement = {
 const parser = new XMLParser({ ignoreAttributes: false });
 const builder = new XMLBuilder({ ignoreAttributes: false });
 
+// Sprawdza, czy dany ZIP to pakiet IDML
 function isIdmlPackage(zip: AdmZip): boolean {
   const names = zip.getEntries().map((e) => e.entryName);
   const hasDesignmap = names.some((n) => n.toLowerCase() === "designmap.xml");
@@ -25,6 +26,7 @@ function isIdmlPackage(zip: AdmZip): boolean {
   return hasDesignmap && hasStories;
 }
 
+// Próba potraktowania bufora jako pojedynczy IDML
 function asSingleIfIdml(buf: Buffer, name?: string) {
   try {
     const zip = new AdmZip(buf);
@@ -40,6 +42,7 @@ function asSingleIfIdml(buf: Buffer, name?: string) {
   return null;
 }
 
+/// Wyodrębnij IDML'e z kontenera ZIP/IDML
 export function enumerateIdmlsFromZipContainer(
   container: Buffer,
   opts?: { requireAtLeastOne?: boolean }
@@ -78,6 +81,7 @@ export function enumerateIdmlsFromZipContainer(
   return results;
 }
 
+/// Pobierz zip + listę stories z IDML
 function getZipFromIdml(idmlBuf: Buffer) {
   const zip = new AdmZip(idmlBuf);
   if (!isIdmlPackage(zip)) {
@@ -109,8 +113,9 @@ export function listSegments(idml: Buffer): Segment[] {
       if (!n || typeof n !== "object") return;
       for (const k of Object.keys(n)) {
         const v = (n as any)[k];
-        if (k === "Content" && typeof v === "string" && v.trim().length > 0)
+        if (k === "Content" && typeof v === "string" && v.trim().length > 0) {
           nodes.push(v);
+        }
         if (v && typeof v === "object") walk(v);
       }
     };
@@ -121,6 +126,33 @@ export function listSegments(idml: Buffer): Segment[] {
     );
   }
   return segments;
+}
+
+function xmlEscapeText(s: string) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function toCdata(s: string) {
+  return "<![CDATA[" + s.replaceAll("]]>", "]]]]><![CDATA[>") + "]]>";
+}
+
+const WS_START = /^\s/;
+const BREAKER_END = /(?:[\p{L}\p{N}]|[)\]\}»”’"'“«:;!?%.,…—–-])$/u;
+
+function needsSpacer(trailing: string, text: string) {
+  return (!trailing || !WS_START.test(trailing)) && BREAKER_END.test(text);
+}
+
+
+function buildContentNode(
+  attrs: string,
+  leading: string,
+  text: string,
+  trailing: string
+) {
+  const safe = xmlEscapeText(text);
+  const spacer = needsSpacer(trailing, text) ? " " : "";
+  return `<Content${attrs}>${leading}${safe}${spacer}${trailing}</Content>`;
 }
 
 export function replaceSegments(idml: Buffer, repl: Replacement[]) {
@@ -141,27 +173,72 @@ export function replaceSegments(idml: Buffer, repl: Replacement[]) {
     const targets = byStory.get(s.entryName);
     if (!targets?.length) continue;
 
-    const xml = s.getData().toString("utf8");
-    const obj = parser.parse(xml) as any;
+    let xml = s.getData().toString("utf8");
 
-    const nodes: Array<{ parent: any; key: string }> = [];
-    const walk = (n: any) => {
-      if (!n || typeof n !== "object") return;
-      for (const k of Object.keys(n)) {
-        const v = (n as any)[k];
-        if (k === "Content" && typeof v === "string" && v.trim().length > 0)
-          nodes.push({ parent: n, key: k });
-        if (v && typeof v === "object") walk(v);
+    let counter = 0;
+    let replaced = xml.replace(
+      /<Content([^>]*)>([\s\S]*?)<\/Content>/g,
+      (full, attrs: string, inner: string) => {
+        if (inner.trim().length === 0) return full;
+        const t = targets.find((x) => x.index === counter);
+        counter++;
+        if (!t) return full;
+
+        const m = inner.match(/^(\s*)([\s\S]*?)(\s*)$/);
+        const leading = m?.[1] ?? "";
+        const trailing = m?.[3] ?? "";
+
+        return buildContentNode(attrs, leading, t.translatedText, trailing);
       }
-    };
-    walk(obj);
+    );
 
-    for (const t of targets) {
-      const node = nodes[t.index];
-      if (node) node.parent[node.key] = t.translatedText;
+    // walidacja całości
+    if (XMLValidator.validate(replaced) !== true) {
+      // fallback segment-po-segmencie z lokalną walidacją i CDATA
+      let idx = 0;
+      replaced = xml.replace(
+        /<Content([^>]*)>([\s\S]*?)<\/Content>/g,
+        (full, attrs: string, inner: string) => {
+          if (inner.trim().length === 0) return full;
+          const t = targets.find((x) => x.index === idx);
+          idx++;
+          if (!t) return full;
+
+          const m = inner.match(/^(\s*)([\s\S]*?)(\s*)$/);
+          const leading = m?.[1] ?? "";
+          const trailing = m?.[3] ?? "";
+
+          const tryEscaped = buildContentNode(
+            attrs,
+            leading,
+            t.translatedText,
+            trailing
+          );
+          const probe = replacedFragment(xml, full, tryEscaped);
+          if (XMLValidator.validate(probe) === true) return tryEscaped;
+
+          const spacer = needsSpacer(trailing, t.translatedText) ? " " : "";
+          const cdata = `<Content${attrs}>${leading}${toCdata(
+            t.translatedText
+          )}${spacer}${trailing}</Content>`;
+          const probe2 = replacedFragment(xml, full, cdata);
+          if (XMLValidator.validate(probe2) === true) return cdata;
+
+          return full;
+        }
+      );
     }
 
-    zip.updateFile(s.entryName, Buffer.from(builder.build(obj), "utf8"));
+    replaced = replaced.replace(/<\/Content>(?=\S)/g, "</Content> ");
+
+    zip.updateFile(s.entryName, Buffer.from(replaced, "utf8"));
   }
+
   return zip.toBuffer();
+}
+
+function replacedFragment(doc: string, from: string, to: string) {
+  const pos = doc.indexOf(from);
+  if (pos < 0) return doc;
+  return doc.slice(0, pos) + to + doc.slice(pos + from.length);
 }
